@@ -17,27 +17,62 @@ MODULE_VERSION("0.1");
 /* MAX_LENGTH is set to 92 because
  * ssize_t can't fit the number > 92
  */
-#define MAX_LENGTH 92
+#define MAX_LENGTH 100
+
+#define DEC_LOWDIGIT_BOUND 100000000000000000
 
 static dev_t fib_dev = 0;
 static struct cdev *fib_cdev;
 static struct class *fib_class;
 static DEFINE_MUTEX(fib_mutex);
 
-static long long fib_sequence(long long k)
+typedef union {
+    struct {
+        unsigned long long bin_lower;
+        unsigned long long bin_upper;
+    };
+    struct {
+        unsigned long long dec_lower;
+        unsigned long long dec_upper;
+    };
+} ui128_t;
+
+static ssize_t cntdig(unsigned long long num)
 {
+    ssize_t cnt = 0;
+    do {
+        cnt++;
+        num /= 10;
+    } while (num);
+    return cnt;
+}
+
+static inline void add_ui128_dec(ui128_t *output, ui128_t x, ui128_t y)
+{
+    output->dec_upper = x.dec_upper + y.dec_upper;
+    if (y.dec_lower + x.dec_lower > DEC_LOWDIGIT_BOUND)
+        output->dec_upper++;
+    output->dec_lower = (x.dec_lower + y.dec_lower) % DEC_LOWDIGIT_BOUND;
+}
+
+static ui128_t fib_sequence(long long k)
+{
+    ui128_t fn = {.bin_upper = 0, .bin_lower = 0};
+    ui128_t fn1 = {.bin_upper = 0, .bin_lower = 1};
+
     if (k == 0)
-        return 0;
+        return fn;
     if (k == 1)
-        return 1;
+        return fn1;
 
-    long long fn = 0, fn1 = 1;
-    long long i = 0;
-
+    long long i;
     for (i = 2; i <= k; i++) {
-        long long tmp = fn1;
-        fn1 = fn1 + fn;
-        fn = tmp;
+        ui128_t tmp = {.dec_upper = 0, .dec_lower = 0};
+        add_ui128_dec(&tmp, fn, fn1);
+        fn.dec_upper = fn1.dec_upper;
+        fn.dec_lower = fn1.dec_lower;
+        fn1.dec_upper = tmp.dec_upper;
+        fn1.dec_lower = tmp.dec_lower;
     }
     return fn1;
 }
@@ -63,7 +98,20 @@ static ssize_t fib_read(struct file *file,
                         size_t size,
                         loff_t *offset)
 {
-    return (ssize_t) fib_sequence(*offset);
+    ui128_t res = fib_sequence(*offset);
+    ssize_t lenu = cntdig(res.dec_upper);
+    ssize_t lenl = cntdig(res.dec_lower);
+    char ns[40] = {0};
+    snprintf(ns, lenu + 1, "%llu", res.dec_upper);
+    if (res.dec_upper) {
+        snprintf(ns, lenu + 1, "%llu", res.dec_upper);
+        snprintf(ns + lenu, 18, "%017llu", res.dec_lower);
+    } else {
+        snprintf(ns, lenl + 1, "%llu", res.dec_lower);
+    }
+    if (copy_to_user(buf, ns, strlen(ns) + 1) != 0)
+        return -1;
+    return (ssize_t) strlen(ns);
 }
 
 /* write operation is skipped */
